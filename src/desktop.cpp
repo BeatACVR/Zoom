@@ -4,43 +4,62 @@
 #include "desktop.hpp"
 #include "settings.hpp"
 
-#include <geode.custom-keybinds/include/Keybinds.hpp>
-
 #include <Geode/Geode.hpp>
 
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/RetryLevelLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCMouseDispatcher.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-#ifdef GEODE_IS_WINDOWS
-#include <Geode/modify/CCEGLView.hpp>
-#else
+#ifndef GEODE_IS_WINDOWS
 #include <objc/message.h>
 #endif // GEODE_IS_WINDOWS
 #include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
-using namespace keybinds;
 
 WindowsZoomManager* WindowsZoomManager::get() {
 	static auto inst = new WindowsZoomManager;
 	return inst;
 }
 
+namespace {
+	CCPoint getScreenCenter() {
+		auto screenSize = getScreenSize();
+		return ccp(screenSize.width * 0.5f, screenSize.height * 0.5f);
+	}
+}
+
 void WindowsZoomManager::togglePauseMenu() {
 	if (!isPaused) return;
 
-	CCNode* pauseLayer = CCScene::get()->getChildByID("PauseLayer");
-	if (!pauseLayer) return;
+	CCNode* menuLayer = activeMenuLayer;
+	if (menuLayer && !menuLayer->getParent()) {
+		menuLayer = nullptr;
+		activeMenuLayer = nullptr;
+	}
 
-	pauseLayer->setVisible(!pauseLayer->isVisible());
+	if (!menuLayer) {
+		menuLayer = CCScene::get()->getChildByID("PauseLayer");
+	}
+	if (!menuLayer) return;
+
+	menuLayer->setVisible(!menuLayer->isVisible());
 }
 
 void WindowsZoomManager::setPauseMenuVisible(bool visible) {
-	CCNode* pauseLayer = CCScene::get()->getChildByID("PauseLayer");
-	if (!pauseLayer) return;
+	CCNode* menuLayer = activeMenuLayer;
+	if (menuLayer && !menuLayer->getParent()) {
+		menuLayer = nullptr;
+		activeMenuLayer = nullptr;
+	}
 
-	pauseLayer->setVisible(visible);
+	if (!menuLayer) {
+		menuLayer = CCScene::get()->getChildByID("PauseLayer");
+	}
+	if (!menuLayer) return;
+
+	menuLayer->setVisible(visible);
 }
 
 void WindowsZoomManager::setZoom(float zoom) {
@@ -123,12 +142,27 @@ void WindowsZoomManager::onResume() {
 	setPos(0.0f, 0.0f);
 
 	isPaused = false;
-	WindowsZoomManager::get()->isPanning = false;
+	isPanning = false;
+	shouldFocusDeath = false;
+	activeMenuLayer = nullptr;
 }
 
-void WindowsZoomManager::onPause() {
+void WindowsZoomManager::onPause(CCNode* menuLayer) {
 	isPaused = true;
-	WindowsZoomManager::get()->isPanning = false;
+	isPanning = false;
+	if (menuLayer) {
+		activeMenuLayer = menuLayer;
+	}
+
+	if (shouldFocusDeath) {
+		move(getScreenCenter() - lastDeathScreenPos);
+		shouldFocusDeath = false;
+	}
+}
+
+void WindowsZoomManager::onPlayerDeath(CCPoint screenPos) {
+	lastDeathScreenPos = screenPos;
+	shouldFocusDeath = true;
 }
 
 void WindowsZoomManager::onScroll(float y, float x) {
@@ -173,14 +207,7 @@ void WindowsZoomManager::onScreenModified() {
 
 class $modify(PauseLayer) {
 	void customSetup() {
-		this->template addEventListener<InvokeBindFilter>([=](InvokeBindEvent* event) {
-			if (event->isDown()) {
-				WindowsZoomManager::get()->togglePauseMenu();
-			}
-
-			return ListenerResult::Propagate;
-		}, "toggle_menu"_spr);
-
+		WindowsZoomManager::get()->onPause(this);
 		PauseLayer::customSetup();
 	}
 
@@ -210,7 +237,35 @@ class $modify(PauseLayer) {
 	}
 };
 
+class $modify(RetryLevelLayer) {
+	void customSetup() {
+		WindowsZoomManager::get()->onPause(this);
+		RetryLevelLayer::customSetup();
+	}
+
+	void onReplay(CCObject* sender) {
+		WindowsZoomManager::get()->onResume();
+		RetryLevelLayer::onReplay(sender);
+	}
+
+	void onMenu(CCObject* sender) {
+		WindowsZoomManager::get()->onResume();
+		RetryLevelLayer::onMenu(sender);
+	}
+};
+
 class $modify(PlayLayer) {
+	void destroyPlayer(PlayerObject* player, GameObject* object) {
+		if (player) {
+			auto playLayer = CCScene::get()->getChildByID("PlayLayer");
+			if (playLayer) {
+				WindowsZoomManager::get()->onPlayerDeath(playLayer->convertToWorldSpace(player->getPosition()));
+			}
+		}
+
+		PlayLayer::destroyPlayer(player, object);
+	}
+
 	void pauseGame(bool p0) {
 		WindowsZoomManager::get()->onPause();
 		PlayLayer::pauseGame(p0);
@@ -219,6 +274,16 @@ class $modify(PlayLayer) {
 	void startGame() {
 		WindowsZoomManager::get()->onResume();
 		PlayLayer::startGame();
+	}
+
+	void resetLevel() {
+		WindowsZoomManager::get()->onResume();
+		PlayLayer::resetLevel();
+	}
+
+	void levelComplete() {
+		WindowsZoomManager::get()->onResume();
+		PlayLayer::levelComplete();
 	}
 
 	bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
@@ -234,22 +299,7 @@ class $modify(CCScheduler) {
 	}
 };
 
-#ifdef GEODE_IS_WINDOWS
-class $modify(CCEGLView) {
-	void onGLFWMouseCallBack(GLFWwindow* window, int button, int action, int mods) {
-		if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
-			if (action == GLFW_PRESS) {
-				WindowsZoomManager::get()->isPanning = true;
-			}
-			else if (action == GLFW_RELEASE) {
-				WindowsZoomManager::get()->isPanning = false;
-			}
-		}
-
-		CCEGLView::onGLFWMouseCallBack(window, button, action, mods);
-	}
-};
-#else
+#ifndef GEODE_IS_WINDOWS
 void otherMouseDownHook(void* self, SEL sel, void* event) {
 	WindowsZoomManager::get()->isPanning = true;
 	reinterpret_cast<void(*)(void*, SEL, void*)>(objc_msgSend)(self, sel, event);

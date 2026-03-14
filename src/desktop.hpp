@@ -9,9 +9,12 @@ class WindowsZoomManager {
 public:
 	CCPoint lastMousePos;
 	CCPoint deltaMousePos;
+	CCPoint lastDeathScreenPos;
+	CCNode* activeMenuLayer = nullptr;
 
-	bool isPaused;
-	bool isPanning;
+	bool isPaused = false;
+	bool isPanning = false;
+	bool shouldFocusDeath = false;
 
 	static WindowsZoomManager* get();
 
@@ -31,8 +34,9 @@ public:
 	CCPoint getMousePosOnNode(CCNode* node);
 	
 	void onResume();
-	void onPause();
+	void onPause(CCNode* menuLayer = nullptr);
 	void onScroll(float y, float x);
+	void onPlayerDeath(CCPoint screenPos);
 private:
 	void onScreenModified();
 };
